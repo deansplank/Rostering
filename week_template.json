@@ -1,0 +1,9 @@
+{
+  "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+ "weekday_shifts": ["AM1","AM2","MC1_GON","MC2","PM1","PM2","TILL1","TILL2","GATE","FLOOR","MC1_GS"],
+"weekend_shifts": ["AM1","AM2","MC1_GON","MC2","PM1","PM2","TILL1","TILL2","GATE","FLOOR","MC1_GS"],
+  "weekend_days": ["Sat","Sun"],
+  "seasonal_optional": {
+    "FLOOR2": false
+  }
+}

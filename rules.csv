@@ -1,0 +1,7 @@
+name,allowed_shifts,forbidden_shifts
+Jim Sheard,PM1|PM2,
+David Glanfield,AM1|AM2|MC1_GON,
+Deagan Fahrney,PM1|PM2,
+Malcolm Officer,MC2|TILL1|TILL2|GATE|FLOOR|MC1_GS,AM1|AM2|MC1_GON|PM1|PM2
+Jack Frith,TILL1|TILL2|GATE|FLOOR|MC1_GS|MC2,
+Harry Brockman,,

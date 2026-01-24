@@ -1,0 +1,52 @@
+name,day,type,shift,weight
+Dean Plank,Sat,WANT,PM1,999
+Jack Frith,Fri,OFF,ANY,5
+Josh Stephens,Mon,OFF,ANY,999
+Josh Stephens,Sun,OFF,ANY,999
+David Glanfield,Tue,OFF,ANY,999
+David Glanfield,Wed,OFF,ANY,999
+Jim Sheard,Fri,OFF,ANY,999
+Jim Sheard,Sat,OFF,ANY,999
+Megan Fennell,Mon,OFF,ANY,999
+Megan Fennell,Tue,OFF,ANY,999
+Pascal Seeler,Mon,OFF,ANY,999
+Pascal Seeler,Tue,OFF,ANY,999
+Pascal Seeler,Sat,OFF,ANY,999
+Pascal Seeler,Sun,OFF,ANY,999
+Harry Brockman,Mon,OFF,ANY,999
+Harry Brockman,Sun,OFF,ANY,999
+Dean Plank,Thu,OFF,ANY,999
+Dean Plank,Fri,OFF,ANY,999
+Matt Wright,Tue,OFF,ANY,999
+Matt Wright,Wed,OFF,ANY,999
+Malcolm Officer,Fri,OFF,ANY,999
+Malcolm Officer,Sat,OFF,ANY,999
+Jack Frith,Mon,OFF,ANY,999
+Jack Frith,Tue,OFF,ANY,999
+Romana Suhajdova,Wed,OFF,ANY,999
+Romana Suhajdova,Thu,OFF,ANY,999
+Marie Sierks,Fri,OFF,ANY,999
+Marie Sierks,Sat,OFF,ANY,999
+Briana Esapour,Mon,OFF,ANY,999
+Briana Esapour,Sun,OFF,ANY,999
+Stela Majer,Wed,OFF,ANY,999
+Stela Majer,Thu,OFF,ANY,999
+Josh Donoghue,Tue,OFF,ANY,999
+Josh Donoghue,Wed,OFF,ANY,999
+Haeyon Yoon,Tue,OFF,ANY,999
+Haeyon Yoon,Wed,OFF,ANY,999
+Haeyon Yoon,Thu,OFF,ANY,999
+Haeyon Yoon,Fri,OFF,ANY,999
+Haeyon Yoon,Sat,OFF,ANY,999
+Haeyon Yoon,Sun,OFF,ANY,999
+Jack Smith,Fri,OFF,ANY,999
+Jack Smith,Sat,OFF,ANY,999
+Anissa Benbila,Fri,OFF,ANY,999
+Anissa Benbila,Sat,OFF,ANY,999
+Anissa Benbila,Sun,OFF,ANY,999
+El,Mon,OFF,ANY,999
+El,Wed,OFF,ANY,999
+El,Thu,OFF,ANY,999
+El,Fri,OFF,ANY,999
+El,Sat,OFF,ANY,999
+El,Sun,OFF,ANY,999
