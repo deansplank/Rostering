@@ -93,11 +93,59 @@ st.caption(
     "Shift can be ANY or a specific shift like AM1, PM2."
 )
 
+SHIFT_OPTIONS = [
+    "ANY",
+    # Gondola
+    "AM1", "AM2", "MC1_GON", "MC2", "PM1", "PM2",
+    # Guest Services
+    "TILL1", "TILL2", "TILL3", "GATE", "FLOOR", "FLOOR2", "MC1_GS",
+]
+
+TYPE_OPTIONS = ["OFF", "WANT", "AVOID"]
+DAY_OPTIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 edited_req_df = st.data_editor(
     req_df,
     num_rows="dynamic",
-    use_container_width=True
+    use_container_width=True,
+    column_config={
+        "name": st.column_config.SelectboxColumn(
+            "name",
+            options=[p.name for p in people],
+            required=True,
+        ),
+        "day": st.column_config.SelectboxColumn(
+            "day",
+            options=DAY_OPTIONS,
+            required=True,
+        ),
+        "type": st.column_config.SelectboxColumn(
+            "type",
+            options=TYPE_OPTIONS,
+            required=True,
+        ),
+        "shift": st.column_config.SelectboxColumn(
+            "shift",
+            options=SHIFT_OPTIONS,
+            required=True,
+        ),
+        "weight": st.column_config.NumberColumn(
+            "weight",
+            min_value=0,
+            step=1,
+            help="OFF is treated as hard. WANT/AVOID: higher = stronger preference.",
+        ),
+    },
 )
+
+# Default weights if blank
+edited_req_df["weight"] = edited_req_df.apply(
+    lambda r: 999 if r.get("type") == "OFF" and pd.isna(r.get("weight")) else
+              10  if r.get("type") in ("WANT","AVOID") and pd.isna(r.get("weight")) else
+              r.get("weight"),
+    axis=1
+)
+
 
 if st.button("💾 Save Requests"):
     edited_req_df.to_csv(req_path, index=False)
