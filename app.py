@@ -147,7 +147,23 @@ if st.button("🚀 Generate Roster"):
 
         # Combine manual requests with auto-generated OFF rows
         manual_df = edited_req_df.copy()
-        combined_df = pd.concat([manual_df, pd.DataFrame(off_rows)], ignore_index=True)
+
+        # Ensure required columns exist
+        if "weight" not in manual_df.columns:
+            manual_df["weight"] = ""
+
+        # Default missing weights:
+        # - OFF → 999
+        # - WANT / AVOID → 10
+        manual_df["weight"] = manual_df.apply(
+            lambda r: 999 if r.get("type") == "OFF" else (r.get("weight") if pd.notna(r.get("weight")) else 10),
+            axis=1
+        )
+
+        off_df = pd.DataFrame(off_rows)
+
+        combined_df = pd.concat([manual_df, off_df], ignore_index=True)
+
 
         # Write a runtime requests file for the solver
         runtime_req_path = BASE / "_requests_runtime.csv"
