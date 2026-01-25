@@ -2,12 +2,20 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import shutil
+from copy import copy
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
-from generate_roster import solve_week, load_staff, load_rules, load_requests, load_week_template
+from generate_roster import (
+    solve_week,
+    load_staff,
+    load_rules,
+    load_requests,
+    load_week_template,
+)
 from export_excel import export_roster_to_template
+
 
 # ============================================================
 # CONFIG
@@ -38,264 +46,265 @@ def output_filename():
     return BASE / f"Generated_Roster_{ts}.xlsx"
 
 
-def default_weight(row):
-    t = str(row.get("type", "")).strip().upper()
-    w = row.get("weight", None)
-    if pd.isna(w) or str(w).strip() == "":
-        return 999 if t == "OFF" else 10
-    return int(w)
+def ensure_staff_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure staff.csv supports capability + visibility.
+    Adds show_gondola/show_gs if missing, defaulting to capability.
+    """
+    if "can_gondola" not in df.columns:
+        df["can_gondola"] = 0
+    if "can_gs" not in df.columns:
+        df["can_gs"] = 1
+    if "show_gondola" not in df.columns:
+        df["show_gondola"] = df["can_gondola"]
+    if "show_gs" not in df.columns:
+        df["show_gs"] = df["can_gs"]
+
+    # Normalise types
+    df["can_gondola"] = df["can_gondola"].fillna(0).astype(int)
+    df["can_gs"] = df["can_gs"].fillna(1).astype(int)
+    df["show_gondola"] = df["show_gondola"].fillna(df["can_gondola"]).astype(int)
+    df["show_gs"] = df["show_gs"].fillna(df["can_gs"]).astype(int)
+
+    return df
 
 
-def sync_availability_with_staff(staff_df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure availability.csv includes exactly all staff (add missing, drop removed)."""
-    staff_names = staff_df["name"].astype(str).str.strip().tolist()
+def sync_availability(staff_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep availability.csv aligned with staff.csv."""
+    names = staff_df["name"].tolist()
 
     if AVAIL_PATH.exists():
-        avail_df = pd.read_csv(AVAIL_PATH)
+        avail = pd.read_csv(AVAIL_PATH)
     else:
-        avail_df = pd.DataFrame(columns=["name"] + DAYS)
+        avail = pd.DataFrame(columns=["name"] + DAYS)
 
-    if "name" not in avail_df.columns:
-        avail_df.insert(0, "name", "")
+    if "name" not in avail.columns:
+        avail.insert(0, "name", "")
 
     for d in DAYS:
-        if d not in avail_df.columns:
-            avail_df[d] = 1
+        if d not in avail.columns:
+            avail[d] = 1
 
-    avail_df["name"] = avail_df["name"].astype(str).str.strip()
+    avail["name"] = avail["name"].astype(str).str.strip()
+    avail = avail[avail["name"].isin(names)]
 
-    # Keep only staff that still exist
-    avail_df = avail_df[avail_df["name"].isin(staff_names)]
-
-    # Add missing staff (default available)
-    existing = set(avail_df["name"].tolist())
-    missing = [n for n in staff_names if n not in existing]
+    existing = set(avail["name"].tolist())
+    missing = [n for n in names if n not in existing]
     if missing:
         add_rows = pd.DataFrame([{"name": n, **{d: 1 for d in DAYS}} for n in missing])
-        avail_df = pd.concat([avail_df, add_rows], ignore_index=True)
+        avail = pd.concat([avail, add_rows], ignore_index=True)
 
-    # Order to match staff.csv
-    avail_df["__order"] = avail_df["name"].apply(lambda x: staff_names.index(x) if x in staff_names else 9999)
-    avail_df = avail_df.sort_values("__order").drop(columns="__order").reset_index(drop=True)
+    # Keep same order as staff.csv
+    avail["__order"] = avail["name"].apply(lambda x: names.index(x) if x in names else 9999)
+    avail = avail.sort_values("__order").drop(columns="__order").reset_index(drop=True)
 
-    avail_df.to_csv(AVAIL_PATH, index=False)
-    return avail_df
+    avail.to_csv(AVAIL_PATH, index=False)
+    return avail
 
 
-def detect_template_sheets(template_path: Path) -> tuple[str, str]:
+def detect_sheets(template: Path):
     """
-    Detects the Gondola and GS sheet names from the workbook so export never KeyErrors.
-    - Gondola: name contains "gondola" (case-insensitive)
-    - GS: name contains "guest" or "gs"
-    Fallback: if there are exactly 2 sheets, pick the other as GS.
+    Detects sheet names from the workbook.
+    Prefers 'Gondola' / 'Guest Services' / 'GS Host' etc.
     """
-    wb = load_workbook(template_path)
+    wb = load_workbook(template)
     sheets = wb.sheetnames
 
-    gondola_sheet = None
-    gs_sheet = None
-
-    for s in sheets:
-        ls = s.lower().strip()
-        if gondola_sheet is None and "gondola" in ls:
-            gondola_sheet = s
-        if gs_sheet is None and ("guest" in ls or ls == "gs" or "gs " in ls or " gs" in ls or "gs_host" in ls or "gs host" in ls):
-            gs_sheet = s
-
-    # Fallbacks
-    if gondola_sheet is None and sheets:
-        gondola_sheet = sheets[0]
-
-    if gs_sheet is None:
-        if len(sheets) == 2:
-            gs_sheet = sheets[1] if sheets[0] == gondola_sheet else sheets[0]
-        elif sheets:
-            # pick a non-gondola sheet if possible
-            for s in sheets:
-                if s != gondola_sheet:
-                    gs_sheet = s
-                    break
-            if gs_sheet is None:
-                gs_sheet = gondola_sheet
-
-    return gondola_sheet, gs_sheet
+    gondola = next((s for s in sheets if "gondola" in s.lower()), sheets[0])
+    gs = next(
+        (s for s in sheets if "guest" in s.lower() or s.lower().startswith("gs")),
+        sheets[1] if len(sheets) > 1 else sheets[0],
+    )
+    return gondola, gs
 
 
-def _build_name_to_row(ws, name_col: int = 1, start_row: int = 5, max_scan: int = 600) -> dict[str, int]:
-    m: dict[str, int] = {}
+def make_runtime_template() -> Path:
+    """Copy the master template to a runtime copy so Excel locks never break generation."""
+    rt = BASE / "_template_runtime.xlsx"
+    shutil.copyfile(TEMPLATE_PATH, rt)
+    return rt
+
+
+def _sheet_day_cols(ws):
+    """Map 'Mon'..'Sun' -> column index from header row 4."""
+    day_to_col = {}
+    for c in range(1, 60):
+        v = ws.cell(4, c).value
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s in DAYS:
+            day_to_col[s] = c
+    return day_to_col
+
+
+def _sheet_name_rows(ws, start_row=5, name_col=1, max_scan=800):
+    """Map staff name -> row index."""
+    name_to_row = {}
     for r in range(start_row, start_row + max_scan):
         v = ws.cell(r, name_col).value
         if v is None:
             continue
         name = str(v).strip()
         if name:
-            m[name] = r
-    return m
+            name_to_row[name] = r
+    return name_to_row
 
 
-def _build_day_to_col(ws, header_row: int = 4, start_col: int = 3, max_scan: int = 30) -> dict[str, int]:
-    m: dict[str, int] = {}
-    for c in range(start_col, start_col + max_scan):
-        v = ws.cell(header_row, c).value
-        if v is None:
-            continue
-        day = str(v).strip()
-        if day:
-            m[day] = c
-    return m
+def _find_last_staff_row(ws, start_row=5, name_col=1, max_scan=800):
+    last = start_row - 1
+    for r in range(start_row, start_row + max_scan):
+        v = ws.cell(r, name_col).value
+        if v is not None and str(v).strip():
+            last = r
+    return max(last, start_row)
 
 
-def ensure_template_has_staff_rows(template_path: Path, staff_df: pd.DataFrame) -> None:
+def _copy_row_style(ws, src_row: int, dst_row: int, max_col: int):
+    """Copy cell style/formatting from src_row to dst_row (values not copied)."""
+    for c in range(1, max_col + 1):
+        src = ws.cell(src_row, c)
+        dst = ws.cell(dst_row, c)
+        # openpyxl styles can be StyleProxy objects; copy() materializes a concrete style
+        if src.has_style:
+            dst._style = copy(src._style)
+
+def apply_visibility_to_runtime_template(runtime_template: Path, gondola_sheet: str, gs_sheet: str, staff_df: pd.DataFrame):
     """
-    Keeps your existing template formatting.
-    Adds missing staff names to the bottom of the correct sheet by copying the last staff row styles.
-    Does NOT delete rows (removals are handled by clearing names optionally).
+    On the *runtime* template copy only:
+    - Remove hidden staff from each sheet (clear name + day cells)
+    - Ensure visible staff exist (append to bottom, copying formatting)
     """
-    gondola_sheet, gs_sheet = detect_template_sheets(template_path)
-    wb = load_workbook(template_path)
+    staff_df = staff_df.copy()
+    staff_df["name"] = staff_df["name"].astype(str).str.strip()
+    staff_df = ensure_staff_columns(staff_df)
+
+    show_gondola = [n for n in staff_df.loc[staff_df["show_gondola"] == 1, "name"].tolist() if n]
+    show_gs = [n for n in staff_df.loc[staff_df["show_gs"] == 1, "name"].tolist() if n]
+
+    wb = load_workbook(runtime_template)
     ws_g = wb[gondola_sheet]
     ws_s = wb[gs_sheet]
 
-    # Determine which names should be on each sheet
-    staff_df = staff_df.copy()
-    staff_df["name"] = staff_df["name"].astype(str).str.strip()
+    def process_sheet(ws, allowed_names):
+        allowed_set = set(allowed_names)
+        day_cols = _sheet_day_cols(ws)
+        name_rows = _sheet_name_rows(ws)
 
-    gondola_names = staff_df.loc[staff_df["can_gondola"] == 1, "name"].tolist()
-    gs_names = staff_df.loc[staff_df["can_gs"] == 1, "name"].tolist()
+        # 1) Clear names that are not allowed on this sheet
+        for name, r in list(name_rows.items()):
+            if name not in allowed_set:
+                ws.cell(r, 1).value = ""
+                for c in day_cols.values():
+                    ws.cell(r, c).value = ""
 
-    def add_missing(ws, names):
-        name_to_row = _build_name_to_row(ws)
-        day_to_col = _build_day_to_col(ws)
+        # Re-scan after clears
+        name_rows = _sheet_name_rows(ws)
 
-        # Find last filled staff row (based on any name in col A)
-        last_row = 4
-        for r in sorted(name_to_row.values()):
-            last_row = max(last_row, r)
+        # 2) Append missing allowed names (copy formatting from last staff row)
+        last_staff_row = _find_last_staff_row(ws)
+        # pick a formatting template row (last existing row with a name, or row 5)
+        template_row = last_staff_row
 
-        # If template has no staff rows at all, we still append starting at row 5
-        template_row = last_row if last_row >= 5 else 5
-        # Copy styles from this row if possible
-        can_copy_style = template_row >= 5 and ws.cell(template_row, 1).value is not None
+        max_col = max(day_cols.values()) if day_cols else 3 + len(DAYS) - 1
 
-        for n in names:
-            if n in name_to_row:
+        for name in allowed_names:
+            if name in name_rows:
                 continue
+            new_row = last_staff_row + 1
+            last_staff_row = new_row
 
-            new_row = last_row + 1
-            last_row = new_row
-
-            # Copy formatting from template_row into new_row
-            if can_copy_style:
-                # Copy style for name, notes, and day cells (C..)
-                max_col = max(day_to_col.values()) if day_to_col else 3 + len(DAYS) - 1
-                for c in range(1, max_col + 1):
-                    src = ws.cell(template_row, c)
-                    dst = ws.cell(new_row, c)
-                    if src.has_style:
-                        dst._style = src._style
-                    dst.number_format = src.number_format
-                    dst.protection = src.protection
-                    dst.alignment = src.alignment
-
-            # Write values
-            ws.cell(new_row, 1).value = n
-            # Clear shift cells
-            for c in day_to_col.values():
+            _copy_row_style(ws, template_row, new_row, max_col)
+            ws.cell(new_row, 1).value = name
+            # clear day cells (keep formatting)
+            for c in day_cols.values():
                 ws.cell(new_row, c).value = ""
 
-    add_missing(ws_g, gondola_names)
-    add_missing(ws_s, gs_names)
+    process_sheet(ws_g, show_gondola)
+    process_sheet(ws_s, show_gs)
 
-    wb.save(template_path)
+    wb.save(runtime_template)
 
 
 # ============================================================
-# PAGE SETUP
+# STREAMLIT SETUP
 # ============================================================
 st.set_page_config(page_title="Skyline Roster Generator", layout="wide")
 st.title("🗓️ Skyline Roster Generator")
 
-# Load staff fresh each run
+# ============================================================
+# LOAD CORE DATA
+# ============================================================
 staff_df = pd.read_csv(STAFF_PATH)
 staff_df["name"] = staff_df["name"].astype(str).str.strip()
+staff_df = ensure_staff_columns(staff_df)
+staff_df.to_csv(STAFF_PATH, index=False)
 
-# Keep availability synced always
-avail_df = sync_availability_with_staff(staff_df)
-
+avail_df = sync_availability(staff_df)
 
 # ============================================================
 # MANAGE STAFF
 # ============================================================
 st.header("Manage Staff")
 
-with st.expander("➕ Add staff", expanded=False):
-    with st.form("add_staff_form_unique", clear_on_submit=True):
+with st.expander("➕ Add staff"):
+    with st.form("add_staff", clear_on_submit=True):
         name = st.text_input("Full name").strip()
+
         can_gondola = st.checkbox("Can work Gondola", value=False)
         can_gs = st.checkbox("Can work Guest Services", value=True)
-        submitted = st.form_submit_button("Add")
 
-    if submitted:
+        show_gondola = st.checkbox("Show on Gondola roster", value=can_gondola)
+        show_gs = st.checkbox("Show on Guest Services roster", value=can_gs)
+
+        submit = st.form_submit_button("Add staff")
+
+    if submit:
         if not name:
-            st.error("Name cannot be blank.")
+            st.error("Name required.")
+        elif name.lower() in staff_df["name"].str.lower().tolist():
+            st.error("Staff member already exists.")
         else:
-            existing = set(staff_df["name"].str.lower().tolist())
-            if name.lower() in existing:
-                st.error("That name already exists.")
-            else:
-                staff_df.loc[len(staff_df)] = [name, int(can_gondola), int(can_gs)]
-                staff_df.to_csv(STAFF_PATH, index=False)
-
-                # Sync availability + ensure template has the new name
-                staff_df = pd.read_csv(STAFF_PATH)
-                staff_df["name"] = staff_df["name"].astype(str).str.strip()
-                sync_availability_with_staff(staff_df)
-                ensure_template_has_staff_rows(TEMPLATE_PATH, staff_df)
-
-                st.success(f"Added {name}")
-                st.rerun()
-
-with st.expander("➖ Remove staff", expanded=False):
-    remove_name = st.selectbox("Select staff member", [""] + staff_df["name"].tolist())
-    confirm = st.checkbox("Confirm removal (this cannot be undone)")
-
-    if st.button("Remove selected staff"):
-        if not remove_name:
-            st.error("Pick a staff member first.")
-        elif not confirm:
-            st.error("Tick the confirmation box.")
-        else:
-            staff_df = staff_df[staff_df["name"] != remove_name].reset_index(drop=True)
+            staff_df.loc[len(staff_df)] = {
+                "name": name,
+                "can_gondola": int(can_gondola),
+                "can_gs": int(can_gs),
+                "show_gondola": int(show_gondola),
+                "show_gs": int(show_gs),
+            }
             staff_df.to_csv(STAFF_PATH, index=False)
+            sync_availability(staff_df)
+            st.success(f"Added {name}")
+            st.rerun()
 
-            # Sync availability (template rows can stay; exporter ignores blank names)
-            staff_df = pd.read_csv(STAFF_PATH)
-            staff_df["name"] = staff_df["name"].astype(str).str.strip()
-            sync_availability_with_staff(staff_df)
+with st.expander("➖ Remove staff"):
+    remove = st.selectbox("Select staff", [""] + staff_df["name"].tolist())
+    confirm = st.checkbox("Confirm removal")
 
-            st.success(f"Removed {remove_name}")
+    if st.button("Remove staff"):
+        if not remove or not confirm:
+            st.error("Select a staff member and confirm.")
+        else:
+            staff_df = staff_df[staff_df["name"] != remove].reset_index(drop=True)
+            staff_df.to_csv(STAFF_PATH, index=False)
+            sync_availability(staff_df)
+            st.success(f"Removed {remove}")
             st.rerun()
 
 st.divider()
 
-
 # ============================================================
-# AVAILABILITY (Days Off)
+# AVAILABILITY
 # ============================================================
 st.header("Availability (Days Off)")
-st.caption("✅ ticked = available. Untick = day off (hard).")
-
-avail_df = pd.read_csv(AVAIL_PATH)
+st.caption("Tick = available, untick = day off (hard rule)")
 
 avail_edit = avail_df.copy()
 for d in DAYS:
     avail_edit[d] = avail_edit[d].fillna(1).astype(int).astype(bool)
 
 edited_avail = st.data_editor(
-    avail_edit,
-    disabled=["name"],
-    use_container_width=True,
-    num_rows="fixed",
+    avail_edit, disabled=["name"], use_container_width=True
 )
 
 if st.button("💾 Save Availability"):
@@ -303,99 +312,90 @@ if st.button("💾 Save Availability"):
     for d in DAYS:
         save[d] = save[d].fillna(True).astype(bool).astype(int)
     save.to_csv(AVAIL_PATH, index=False)
-    st.success("Saved availability")
+    st.success("Availability saved")
 
 st.divider()
 
-
 # ============================================================
-# REQUESTS (dropdowns)
+# REQUESTS
 # ============================================================
-st.header("Requests & Preferences")
-
-people_for_dropdown = load_staff(STAFF_PATH)
-name_options = [p.name for p in people_for_dropdown]
+st.header("Requests")
 
 if REQ_PATH.exists():
     req_df = pd.read_csv(REQ_PATH)
 else:
     req_df = pd.DataFrame(columns=["name", "day", "type", "shift", "weight"])
 
-for col in ["name", "day", "type", "shift", "weight"]:
-    if col not in req_df.columns:
-        req_df[col] = ""
-
-edited_req = st.data_editor(
+req_df = st.data_editor(
     req_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "name": st.column_config.SelectboxColumn("name", options=name_options, required=True),
-        "day": st.column_config.SelectboxColumn("day", options=DAYS, required=True),
-        "type": st.column_config.SelectboxColumn("type", options=TYPE_OPTIONS, required=True),
-        "shift": st.column_config.SelectboxColumn("shift", options=SHIFT_OPTIONS, required=True),
-        "weight": st.column_config.NumberColumn("weight", step=1, min_value=0),
+        "name": st.column_config.SelectboxColumn("name", options=staff_df["name"].tolist()),
+        "day": st.column_config.SelectboxColumn("day", options=DAYS),
+        "type": st.column_config.SelectboxColumn("type", options=TYPE_OPTIONS),
+        "shift": st.column_config.SelectboxColumn("shift", options=SHIFT_OPTIONS),
+        "weight": st.column_config.NumberColumn("weight", min_value=0, step=1),
     },
 )
 
-if len(edited_req) > 0:
-    edited_req["type"] = edited_req["type"].fillna("")
-    edited_req["weight"] = edited_req.apply(default_weight, axis=1)
-
 if st.button("💾 Save Requests"):
-    edited_req.to_csv(REQ_PATH, index=False)
-    st.success("Saved requests")
+    req_df.to_csv(REQ_PATH, index=False)
+    st.success("Requests saved")
 
 st.divider()
 
-
 # ============================================================
-# GENERATE
+# GENERATE ROSTER
 # ============================================================
 st.header("Generate Roster")
 seed = st.slider("Randomness", 0, 1000, 42)
 
 if st.button("🚀 Generate"):
-    # Ensure template rows exist for current staff AND detect correct sheet names
-    staff_now = pd.read_csv(STAFF_PATH)
-    staff_now["name"] = staff_now["name"].astype(str).str.strip()
-    ensure_template_has_staff_rows(TEMPLATE_PATH, staff_now)
+    # 1) Make runtime template copy
+    runtime_template = make_runtime_template()
 
-    gondola_sheet, gs_sheet = detect_template_sheets(TEMPLATE_PATH)
-    st.caption(f"Using template sheets: Gondola='{gondola_sheet}' | GS='{gs_sheet}'")
+    # 2) Detect sheet names (Gondola / GS Host / Guest Services etc)
+    gondola_sheet, gs_sheet = detect_sheets(runtime_template)
 
-    # Reload runtime inputs
-    people_rt = load_staff(STAFF_PATH)
-    rules_rt = load_rules(RULES_PATH)
-    week_rt = load_week_template(WEEK_PATH)
+    # 3) Apply visibility rules to runtime template (THIS is what stops gondola staff showing on GS)
+    apply_visibility_to_runtime_template(runtime_template, gondola_sheet, gs_sheet, staff_df)
 
-    # Availability -> OFF requests
+    # 4) Load model inputs
+    people = load_staff(STAFF_PATH)
+    rules = load_rules(RULES_PATH)
+    week = load_week_template(WEEK_PATH)
+
+    # Availability → OFF requests
     off_rows = []
     for _, r in edited_avail.iterrows():
         for d in DAYS:
             if not bool(r[d]):
-                off_rows.append({"name": r["name"], "day": d, "type": "OFF", "shift": "ANY", "weight": 999})
+                off_rows.append(
+                    {"name": r["name"], "day": d, "type": "OFF", "shift": "ANY", "weight": 999}
+                )
 
-    combined = pd.concat([edited_req, pd.DataFrame(off_rows)], ignore_index=True)
-    runtime_req = BASE / "_requests_runtime.csv"
-    combined.to_csv(runtime_req, index=False)
+    combined = pd.concat([req_df, pd.DataFrame(off_rows)], ignore_index=True)
+    tmp_req = BASE / "_requests_runtime.csv"
+    combined.to_csv(tmp_req, index=False)
 
-    requests = load_requests(runtime_req)
+    requests = load_requests(tmp_req)
 
+    # 5) Solve
     assignments = solve_week(
-        people=people_rt,
-        week=week_rt,
-        rules=rules_rt,
+        people=people,
+        week=week,
+        rules=rules,
         requests=requests,
         random_seed=int(seed),
     )
 
+    # 6) Export
     out = output_filename()
 
-    # Export using detected sheet names (no more KeyError ever)
     export_roster_to_template(
         assignments=assignments,
-        template_path=TEMPLATE_PATH,
+        template_path=runtime_template,
         output_path=out,
         gondola_sheet=gondola_sheet,
         gs_sheet=gs_sheet,

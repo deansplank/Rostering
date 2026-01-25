@@ -1,24 +1,24 @@
-name,can_gondola,can_gs
-Josh Stephens,1,1
-David Glanfield,1,1
-Jim Sheard,1,1
-Megan Fennell,1,1
-Pascal Seeler,1,1
-Harry Brockman,1,1
-Dean Plank,1,1
-Matt Wright,1,1
-Malcolm Officer,1,1
-Jack Frith,1,1
-Deagan Fahrney,1,1
-Romana Suhajdova,0,1
-Marie Sierks,0,1
-Briana Esapour,0,1
-Stela Majer,0,1
-Josh Donoghue,0,1
-Haeyon Yoon,0,1
-Jack Smith,0,1
-Anissa Benbila,0,1
-Elliott Adair,0,1
-jupiter,0,1
-james buckley,1,1
-tre tre,1,1
+name,can_gondola,can_gs,show_gondola,show_gs
+Josh Stephens,1,1,1,0
+David Glanfield,0,1,1,0
+Jim Sheard,0,1,1,0
+Megan Fennell,1,1,1,0
+Pascal Seeler,1,1,1,1
+Harry Brockman,1,1,1,0
+Dean Plank,1,1,1,0
+Matt Wright,1,1,1,0
+Malcolm Officer,1,1,1,1
+Jack Frith,1,1,1,1
+Deagan Fahrney,1,1,1,0
+Romana Suhajdova,0,1,0,1
+Marie Sierks,0,1,0,1
+Briana Esapour,0,1,0,1
+Stela Majer,0,1,0,1
+Josh Donoghue,0,1,0,1
+Haeyon Yoon,0,1,0,1
+Jack Smith,0,1,0,1
+Anissa Benbila,0,1,0,1
+Elliott Adair,0,1,0,1
+jupiter,0,1,0,1
+james buckley,1,1,0,1
+tre tre,1,1,0,1
