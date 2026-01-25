@@ -1,0 +1,12 @@
+# Runtime / generated files
+Generated_Roster_*.xlsx
+_requests_runtime.csv
+_template_runtime.xlsx
+
+# Python
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
