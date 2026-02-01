@@ -1,8 +1,8 @@
 from __future__ import annotations
-from export_excel import export_roster_to_template
+
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -10,7 +10,7 @@ from ortools.sat.python import cp_model
 
 
 # ----------------------------
-# Data models
+# Data models / constants
 # ----------------------------
 
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -21,6 +21,9 @@ GS_SHIFTS = {"TILL1", "TILL2", "TILL3", "GATE", "FLOOR", "FLOOR2", "MC1_GS"}
 PM_SHIFTS = {"PM1", "PM2"}
 AM_SHIFTS = {"AM1", "AM2"}
 SOFT_BLOCK_AFTER_PM = {"MC1_GON"}  # "preferably not"
+
+# GS preference: try have at least one of these on GS each day (soft, not absolute)
+GS_TEAM_LEADS = {"Jack Frith", "Romana Suhajdova"}
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,7 @@ class Person:
 @dataclass(frozen=True)
 class PersonRules:
     allowed_shifts: Optional[set[str]] = None
-    forbidden_shifts: set[str] = None
+    forbidden_shifts: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -57,8 +60,8 @@ def load_staff(path: Path) -> List[Person]:
             people.append(
                 Person(
                     name=row["name"].strip(),
-                    can_gondola=row["can_gondola"].strip() == "1",
-                    can_gs=row["can_gs"].strip() == "1",
+                    can_gondola=str(row.get("can_gondola", "0")).strip() == "1",
+                    can_gs=str(row.get("can_gs", "1")).strip() == "1",
                 )
             )
     if not people:
@@ -78,8 +81,8 @@ def load_rules(path: Path) -> Dict[str, PersonRules]:
             allowed_raw = (row.get("allowed_shifts") or "").strip()
             forbidden_raw = (row.get("forbidden_shifts") or "").strip()
 
-            allowed = set(s.strip() for s in allowed_raw.split("|") if s.strip()) or None
-            forbidden = set(s.strip() for s in forbidden_raw.split("|") if s.strip())
+            allowed = set(s.strip().upper() for s in allowed_raw.split("|") if s.strip()) or None
+            forbidden = set(s.strip().upper() for s in forbidden_raw.split("|") if s.strip())
 
             rules[name] = PersonRules(allowed_shifts=allowed, forbidden_shifts=forbidden)
     return rules
@@ -98,18 +101,29 @@ def load_requests(path: Path) -> List[Request]:
                     name=row["name"].strip(),
                     day=row["day"].strip(),
                     type=row["type"].strip().upper(),
-                    shift=row["shift"].strip(),
-                    weight=int(row["weight"]),
+                    shift=str(row.get("shift") or "ANY").strip().upper(),
+                    weight=int(float(row.get("weight") or 10)),
                 )
             )
     return reqs
 
 
 def load_week_template(path: Path) -> Dict[str, List[str]]:
+    """
+    Your week_template.json format:
+      {
+        "days": ["Mon",...],
+        "weekday_shifts": [...],
+        "weekend_shifts": [...],
+        "weekend_days": ["Sat","Sun"],
+        "seasonal_optional": {"FLOOR2": true/false}
+      }
+    Returns: { "Mon": [...], "Tue": [...], ... }
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     days = data["days"]
-    weekday_shifts = data["weekday_shifts"]
-    weekend_shifts = data["weekend_shifts"]
+    weekday_shifts = [str(s).strip().upper() for s in data["weekday_shifts"]]
+    weekend_shifts = [str(s).strip().upper() for s in data["weekend_shifts"]]
     weekend_days = set(data["weekend_days"])
 
     week: Dict[str, List[str]] = {}
@@ -131,6 +145,8 @@ def load_week_template(path: Path) -> Dict[str, List[str]]:
 # ----------------------------
 
 def is_shift_allowed(person: Person, shift: str, pr: Optional[PersonRules]) -> bool:
+    shift = shift.strip().upper()
+
     # Dept eligibility
     if shift in GONDOLA_SHIFTS and not person.can_gondola:
         return False
@@ -147,7 +163,7 @@ def is_shift_allowed(person: Person, shift: str, pr: Optional[PersonRules]) -> b
 
 
 # ----------------------------
-# Solver
+# Solver (best-effort with holes)
 # ----------------------------
 
 def solve_week(
@@ -156,9 +172,15 @@ def solve_week(
     rules: Dict[str, PersonRules],
     requests: List[Request],
     random_seed: int = 0,
-) -> Dict[Tuple[str, str], str]:
+) -> Dict[Tuple[str, str], Optional[str]]:
     """
-    Returns mapping (day, shift) -> person_name
+    Returns mapping (day, shift) -> person_name | None
+
+    Behaviour:
+      - Leaves holes (None) when needed (instead of crashing).
+      - Hard: at most 1 shift per person per day (no double booking).
+      - Hard: PM -> next day not AM.
+      - Soft: minimise holes (very high weight), fairness, and GS Team Lead coverage.
     """
     model = cp_model.CpModel()
 
@@ -173,40 +195,41 @@ def solve_week(
         pr = rules.get(p.name)
         for d, shifts in week.items():
             for s in shifts:
-                if is_shift_allowed(p, s, pr):
-                    x[(p.name, d, s)] = model.NewBoolVar(f"x_{p.name}_{d}_{s}")
+                s2 = str(s).strip().upper()
+                if is_shift_allowed(p, s2, pr):
+                    x[(p.name, d, s2)] = model.NewBoolVar(f"x_{p.name}_{d}_{s2}")
 
-    # 1) Every shift slot filled exactly once
+    # 1) Every shift slot is either filled by exactly one eligible person OR left unfilled.
+    unfilled: Dict[Tuple[str, str], cp_model.IntVar] = {}
     for d, shifts in week.items():
         for s in shifts:
-            candidates = [x[(pn, d, s)] for pn in person_names if (pn, d, s) in x]
-            if not candidates:
-                raise ValueError(f"No eligible staff for {d} {s} (check staff.csv / rules.csv)")
-            model.Add(sum(candidates) == 1)
+            s2 = str(s).strip().upper()
+            candidates = [x[(pn, d, s2)] for pn in person_names if (pn, d, s2) in x]
+            u = model.NewBoolVar(f"unfilled_{d}_{s2}")
+            unfilled[(d, s2)] = u
+            if candidates:
+                model.Add(sum(candidates) + u == 1)
+            else:
+                model.Add(u == 1)
 
-    # 2) One shift per person per day
+    # 2) One shift per person per day (hard)
     for pn in person_names:
         for d, shifts in week.items():
-            vars_that_day = [x[(pn, d, s)] for s in shifts if (pn, d, s) in x]
+            vars_that_day = [x[(pn, d, str(s).strip().upper())] for s in shifts if (pn, d, str(s).strip().upper()) in x]
             if vars_that_day:
                 model.Add(sum(vars_that_day) <= 1)
 
-    # 3) PM -> next day not AM
+    # 3) PM -> next day not AM (hard)
     for pn in person_names:
         for i, d in enumerate(DAYS[:-1]):
             next_d = DAYS[i + 1]
             if d not in week or next_d not in week:
                 continue
 
-            pm_vars = [x[(pn, d, s)] for s in week[d] if s in PM_SHIFTS and (pn, d, s) in x]
-            am_vars = [x[(pn, next_d, s)] for s in week[next_d] if s in AM_SHIFTS and (pn, next_d, s) in x]
+            pm_vars = [x[(pn, d, str(s).strip().upper())] for s in week[d] if str(s).strip().upper() in PM_SHIFTS and (pn, d, str(s).strip().upper()) in x]
+            am_vars = [x[(pn, next_d, str(s).strip().upper())] for s in week[next_d] if str(s).strip().upper() in AM_SHIFTS and (pn, next_d, str(s).strip().upper()) in x]
 
             if pm_vars and am_vars:
-                # If any PM on day d, then no AM on next day.
-                model.Add(sum(am_vars) == 0).OnlyEnforceIf(pm_vars)  # works because pm_vars are bools
-                # BUT OnlyEnforceIf expects a single literal or list meaning AND.
-                # We want: if (PM1 or PM2) then ...
-                # So create helper var: worked_pm = OR(pm_vars)
                 worked_pm = model.NewBoolVar(f"worked_pm_{pn}_{d}")
                 model.AddMaxEquality(worked_pm, pm_vars)
                 model.Add(sum(am_vars) == 0).OnlyEnforceIf(worked_pm)
@@ -214,11 +237,15 @@ def solve_week(
     # Requests & soft penalties
     objective_terms = []
 
-    # Fairness: try equal number of shifts per person
-    total_slots = sum(len(shifts) for shifts in week.values())
-    target = total_slots / len(people)
+    # HARD priority: minimise unfilled slots first (huge weight)
+    HOLE_PENALTY = 10000
+    for u in unfilled.values():
+        objective_terms.append(u * HOLE_PENALTY)
 
-    # Count shifts per person
+    # Fairness: try equal number of shifts per person (soft)
+    total_slots = sum(len(shifts) for shifts in week.values())
+    target = total_slots / max(1, len(people))
+
     for pn in person_names:
         vars_p = [var for (name, _, _), var in x.items() if name == pn]
         if not vars_p:
@@ -226,31 +253,44 @@ def solve_week(
         count = model.NewIntVar(0, len(DAYS), f"count_{pn}")
         model.Add(count == sum(vars_p))
 
-        # penalize deviation from target (scaled)
-        # use abs via two vars
         dev = model.NewIntVar(0, len(DAYS), f"dev_{pn}")
-        # dev >= count - floor(target), dev >= floor(target) - count
         t = int(round(target))
         model.Add(dev >= count - t)
         model.Add(dev >= t - count)
         objective_terms.append(dev * 10)
 
-    # Soft rule: avoid MC1_GON the day after PM (penalty)
+    # Soft: avoid MC1_GON the day after PM (penalty)
     for pn in person_names:
         for i, d in enumerate(DAYS[:-1]):
             next_d = DAYS[i + 1]
             if d not in week or next_d not in week:
                 continue
-            pm_vars = [x[(pn, d, s)] for s in week[d] if s in PM_SHIFTS and (pn, d, s) in x]
-            next_mc1 = [x[(pn, next_d, s)] for s in week[next_d] if s in SOFT_BLOCK_AFTER_PM and (pn, next_d, s) in x]
+            pm_vars = [x[(pn, d, str(s).strip().upper())] for s in week[d] if str(s).strip().upper() in PM_SHIFTS and (pn, d, str(s).strip().upper()) in x]
+            next_mc1 = [x[(pn, next_d, str(s).strip().upper())] for s in week[next_d] if str(s).strip().upper() in SOFT_BLOCK_AFTER_PM and (pn, next_d, str(s).strip().upper()) in x]
             if pm_vars and next_mc1:
                 worked_pm = model.NewBoolVar(f"worked_pm_soft_{pn}_{d}")
                 model.AddMaxEquality(worked_pm, pm_vars)
-                # If worked_pm and assigned MC1_GON next day -> penalty
-                # Implement as: penalty_var >= worked_pm + mc1 - 1 (AND)
+
                 pen = model.NewBoolVar(f"pen_pm_to_mc1_{pn}_{d}")
                 model.Add(pen >= worked_pm + next_mc1[0] - 1)
                 objective_terms.append(pen * 5)
+
+    # Soft: GS Team Lead coverage each day (if possible)
+    # Prefer at least one of GS_TEAM_LEADS on a GS shift each day.
+    TL_PENALTY = 250
+    for d in DAYS:
+        if d not in week:
+            continue
+        tl_vars = []
+        for tl in GS_TEAM_LEADS:
+            for s in week[d]:
+                s2 = str(s).strip().upper()
+                if s2 in GS_SHIFTS and (tl, d, s2) in x:
+                    tl_vars.append(x[(tl, d, s2)])
+        if tl_vars:
+            has_tl = model.NewBoolVar(f"has_tl_{d}")
+            model.AddMaxEquality(has_tl, tl_vars)
+            objective_terms.append((1 - has_tl) * TL_PENALTY)
 
     # Requests
     for r in requests:
@@ -259,43 +299,41 @@ def solve_week(
         if r.name not in people_by_name:
             continue
 
+        day = r.day
+        shift = r.shift.strip().upper()
+
         if r.type == "OFF":
-            # hard constraint
-            if r.shift == "ANY":
-                # no assignment that day
-                vars_that_day = [x[(r.name, r.day, s)] for s in week[r.day] if (r.name, r.day, s) in x]
+            if shift == "ANY":
+                vars_that_day = [x[(r.name, day, str(s).strip().upper())] for s in week[day] if (r.name, day, str(s).strip().upper()) in x]
                 if vars_that_day:
                     model.Add(sum(vars_that_day) == 0)
             else:
-                if (r.name, r.day, r.shift) in x:
-                    model.Add(x[(r.name, r.day, r.shift)] == 0)
+                if (r.name, day, shift) in x:
+                    model.Add(x[(r.name, day, shift)] == 0)
 
         elif r.type in ("WANT", "AVOID"):
-            # soft penalties/rewards
-            if r.shift == "ANY":
-                # WANT any shift that day: reward if works; AVOID any: penalty if works
-                vars_that_day = [x[(r.name, r.day, s)] for s in week[r.day] if (r.name, r.day, s) in x]
+            w = max(0, int(r.weight))
+            if shift == "ANY":
+                vars_that_day = [x[(r.name, day, str(s).strip().upper())] for s in week[day] if (r.name, day, str(s).strip().upper()) in x]
                 if vars_that_day:
-                    worked = model.NewBoolVar(f"worked_{r.name}_{r.day}")
+                    worked = model.NewBoolVar(f"worked_{r.name}_{day}")
                     model.AddMaxEquality(worked, vars_that_day)
                     if r.type == "WANT":
-                        objective_terms.append((1 - worked) * r.weight)  # penalize NOT working
+                        objective_terms.append((1 - worked) * w)
                     else:
-                        objective_terms.append(worked * r.weight)        # penalize working
+                        objective_terms.append(worked * w)
             else:
-                if (r.name, r.day, r.shift) in x:
-                    var = x[(r.name, r.day, r.shift)]
+                if (r.name, day, shift) in x:
+                    var = x[(r.name, day, shift)]
                     if r.type == "WANT":
-                        objective_terms.append((1 - var) * r.weight)  # penalize not satisfying
+                        objective_terms.append((1 - var) * w)
                     else:
-                        objective_terms.append(var * r.weight)        # penalize assigning
+                        objective_terms.append(var * w)
 
-    # Add a tiny “randomness” jitter so repeated runs aren’t identical
-    # (deterministic per seed if you keep seed stable)
-    if random_seed != 0:
-        # add small penalties based on hashing
+    # small deterministic jitter so rerolls differ a bit
+    if random_seed:
         for (pn, d, s), var in x.items():
-            jitter = (hash((pn, d, s, random_seed)) % 3)  # 0..2
+            jitter = (hash((pn, d, s, int(random_seed))) % 3)  # 0..2
             if jitter:
                 objective_terms.append(var * jitter)
 
@@ -303,50 +341,31 @@ def solve_week(
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10.0
-    # solver.parameters.random_seed = random_seed  # (not always exposed in python cp-sat versions)
+    try:
+        solver.parameters.random_seed = int(random_seed)
+    except Exception:
+        pass
+    solver.parameters.num_search_workers = 8
 
     status = solver.Solve(model)
 
+    # With unfilled vars, we *should* always be feasible; but just in case,
+    # return all holes so the UI/export still works.
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        raise RuntimeError("No feasible roster found with current constraints/requests.")
+        return {(d, str(s).strip().upper()): None for d, shifts in week.items() for s in shifts}
 
-    assignments: Dict[Tuple[str, str], str] = {}
+    assignments: Dict[Tuple[str, str], Optional[str]] = {}
     for d, shifts in week.items():
         for s in shifts:
+            s2 = str(s).strip().upper()
+            assignments[(d, s2)] = None
+            # if unfilled is 1, keep None
+            if solver.Value(unfilled[(d, s2)]) == 1:
+                continue
             for pn in person_names:
-                key = (pn, d, s)
+                key = (pn, d, s2)
                 if key in x and solver.Value(x[key]) == 1:
-                    assignments[(d, s)] = pn
+                    assignments[(d, s2)] = pn
                     break
 
     return assignments
-
-
-def main():
-    base = Path(".")
-    people = load_staff(base / "staff.csv")
-    rules = load_rules(base / "rules.csv")
-    requests = load_requests(base / "requests.csv")
-    week = load_week_template(base / "week_template.json")
-
-    assignments = solve_week(people, week, rules, requests, random_seed=42)
-
-    # Print simple output for now (Excel comes next)
-    for d in DAYS:
-        if d not in week:
-            continue
-        print(f"\n{d}")
-        for s in week[d]:
-            print(f"  {s:8s} -> {assignments[(d, s)]}")
-
-
-    export_roster_to_template(
-    assignments=assignments,
-    template_path="roster_template_FINAL.xlsx",
-    output_path="Generated_Roster.xlsx",
-    gondola_gs_label="GS Host",  # change to "GS" if you prefer
-)
-print("\nSaved: Generated_Roster.xlsx")
-
-if __name__ == "__main__":
-    main()
